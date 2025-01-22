@@ -71,6 +71,86 @@ class SiglipVisionEmbeddings(nn.Module):
         # [Batch_Size, Num_Patches, Embed_Dim]
         return embeddings
 
+class SiglipEncoder(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
+        super().__init__()
+        self.config = config
+        self.layer = nn.ModuleList(
+            [SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
+    
+    def forward(self, input_embeds : torch.Tensor)-> torch.Tensor:
+        hidden_states = input_embeds
+        for encoder_layer in self.layer:
+            hidden_states = encoder_layer(hidden_states)
+
+        return hidden_states
+
+class SiglipMLP(nn.Module):
+    def __init__(self, config:SiglipVisionConfig):
+        super().__init__()
+        self.config = config
+        self.fc1 = (config.hidden_size, config.intermediate_size)
+        self.fc2 = (config.intermediate_size, config.hidden_size)
+
+    def forward(self, hidden_states : torch.Tensor) -> torch.Tensor:
+        hidden_states = self.fc1(hidden_states)
+
+        hidden_states = nn.functional.gelu(hidden_states , approximate="tanh")
+
+class Attention(nn.Module):
+    def __init__(self, config : SiglipVisionConfig) :
+        super().__init__()
+        self.config = config
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim//self.num_heads
+        self.scale = self.head_dim**-0.5 # eqv 1/ root(self.head_dim)
+        self.dropout = config.attention_dropout
+
+        self.k_proj = nn.Linear(self.embed_dim , self.embed_dim)
+        self.v_proj = nn.Linear(self.embed_dim , self.embed_dim)
+        self.q_proj = nn.Linear(self.embed_dim , self.embed_dim)
+        self.out_proj = nn.Linear(self.embed_dim , self.embed_dim)
+
+    def forward(self, 
+                hidden_state :torch.Tensor,)-> Tuple[torch.Tensor , Optional[torch.Tensor]]:
+        
+        batch_size , seq_length, _ = hidden_state.size()
+        query_states = self.q_proj(hidden_state) 
+        key_states = self.k_proj(hidden_state) 
+        value_states = self.v_proj(hidden_state) 
+
+        query_states = query_states.view(batch_size, seq_length , self.num_heads , self.head_dim).transpose(1,2)
+        key_states = key_states.view(batch_size, seq_length , self.num_heads , self.head_dim).transpose(1,2)
+        valur_states = value_states.view(batch_size, seq_length , self.num_heads , self.head_dim).transpose(1,2)
+        
+        attn_weight = (torch.matmul(query_states , key_states).transpose(2,3) * self.scale)
+
+        if attn_weight.size() != (batch_size, self.num_heads , seq_length , seq_length):
+            raise ValueError(
+                f"Attention weights size {(batch_size, self.num_heads , seq_length , seq_length)} , is "
+                f"{(attn_weight.size())}"
+            )
+        attn_weight = nn.functional.softmax(attn_weight , dim = -1 , dtype=torch.float32).to(query_states.dtype)
+        attn_weight = nn.functional.dropout(attn_weight , p=self.dropout , training=self.training )
+
+        attn_output = torch.matmul(attn_weight , value_states)
+
+        if attn_output.size() != (batch_size, self.num_heads , seq_length, self.head_dim):
+            raise ValueError(
+                f"Attention weights size {(batch_size, self.num_heads , seq_length , self.head_dim)} , is "
+                f"{(attn_output.size())}"
+            )
+        attn_output = attn_output.transpose(1,2).contiguous()
+
+        attn_output = attn_output.reshape(batch_size , seq_length , self.embed_dim)
+
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output, attn_weight
+
+
 class SiglipEncoderLayer(nn.Module):
     def __init__(self,config:SiglipVisionConfig):
         super().__init__()
@@ -92,6 +172,14 @@ class SiglipEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         residual = hidden_states 
+
+        hidden_states = self.layer_norm2(hidden_states)
+
+        hidden_states = self.mlp(hidden_states)
+
+        hidden_states = residual + hidden_states
+
+        return hidden_states
 
 class SiglipVisionTransformer(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
