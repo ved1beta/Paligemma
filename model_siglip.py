@@ -98,7 +98,7 @@ class SiglipMLP(nn.Module):
 
         hidden_states = nn.functional.gelu(hidden_states , approximate="tanh")
 
-class Attention(nn.Module):
+class SiglipAttention(nn.Module):
     def __init__(self, config : SiglipVisionConfig) :
         super().__init__()
         self.config = config
